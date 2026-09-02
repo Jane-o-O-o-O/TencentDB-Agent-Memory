@@ -46,8 +46,15 @@ agent-default-model:
   model: old-model
   reasoningEffort: medium
 `;
-    const originalCredentials = `DEEPSEEK_API_KEY: keep-this-secret
-PROXY_USER_KEY: old-proxy-key
+    const originalCredentials = `version: 1
+refs:
+  DEEPSEEK_API_KEY: keep-this-secret
+  PROXY_USER_KEY: old-proxy-key
+records:
+  oauth/example:
+    kind: grant
+    payload:
+      refresh_token: keep-this-record
 `;
 
     await writeFile(settingsPath, originalSettings);
@@ -75,8 +82,11 @@ PROXY_USER_KEY: old-proxy-key
     assert.match(settings, /reasoningEffort: medium/);
     assert.doesNotMatch(settings, /legacy-wrong-place/);
 
-    assert.match(credentials, /DEEPSEEK_API_KEY: keep-this-secret/);
-    assert.match(credentials, /PROXY_USER_KEY: "new-proxy-key"/);
+    assert.match(credentials, /version: 1/);
+    assert.match(credentials, /  DEEPSEEK_API_KEY: keep-this-secret/);
+    assert.match(credentials, /  PROXY_USER_KEY: "new-proxy-key"/);
+    assert.match(credentials, /refresh_token: keep-this-record/);
+    assert.doesNotMatch(credentials, /^PROXY_USER_KEY:/m);
   });
 });
 
@@ -98,16 +108,17 @@ test('配置文件不存在时生成 dsh 所需的两个 namespace', async () =>
     assert.match(settings, /provider: "deepseek-official"/);
     assert.match(settings, /model: "deepseek-chat"/);
     assert.equal(
-      credentials.includes('PROXY_USER_KEY: "key-with-#-and-:colon"'),
+      credentials.includes('  PROXY_USER_KEY: "key-with-#-and-:colon"'),
       true,
     );
+    assert.match(credentials, /^version: 1$/m);
   });
 });
 
 test('遇到无法安全增量修改的行内 YAML 时不改动任一文件', async () => {
   await withTemporaryConfig(async ({ settingsPath, credentialsPath }) => {
     const originalSettings = 'llm-deepseek: { baseURL: "https://old.example.com" }\n';
-    const originalCredentials = 'EXISTING_KEY: keep-me\n';
+    const originalCredentials = 'version: 1\nrefs:\n  EXISTING_KEY: keep-me\n';
     await writeFile(settingsPath, originalSettings);
     await writeFile(credentialsPath, originalCredentials);
 
@@ -152,8 +163,8 @@ test('重复执行只更新受管字段，不产生重复 key', async () => {
     assert.equal((settings.match(/^  model:/gm) ?? []).length, 1);
     assert.match(settings, /baseURL: "https:\/\/proxy\.example\.com\/dsh\/two"/);
     assert.match(settings, /model: "model-two"/);
-    assert.equal((credentials.match(/^PROXY_USER_KEY:/gm) ?? []).length, 1);
-    assert.match(credentials, /PROXY_USER_KEY: "key-two"/);
+    assert.equal((credentials.match(/^  PROXY_USER_KEY:/gm) ?? []).length, 1);
+    assert.match(credentials, /  PROXY_USER_KEY: "key-two"/);
   });
 });
 
@@ -174,6 +185,53 @@ test('命令行入口能接收 setup-proxy.sh 传入的参数', async () => {
     });
 
     assert.match(await readFile(settingsPath, 'utf8'), /model: "cli-model"/);
-    assert.match(await readFile(credentialsPath, 'utf8'), /PROXY_USER_KEY: "cli-key"/);
+    assert.match(await readFile(credentialsPath, 'utf8'), /  PROXY_USER_KEY: "cli-key"/);
+  });
+});
+
+test('旧版扁平凭据会迁移到 version 1 refs 并保留注释', async () => {
+  await withTemporaryConfig(async ({ settingsPath, credentialsPath }) => {
+    await writeFile(credentialsPath, `# keep this note
+DEEPSEEK_API_KEY: keep-this-secret
+PROXY_USER_KEY: old-key
+`);
+
+    await mergeDshConfig({
+      settingsPath,
+      credentialsPath,
+      baseUrl: 'https://proxy.example.com/dsh/migrated',
+      model: 'deepseek-chat',
+      userKey: 'new-key',
+    });
+
+    const credentials = await readFile(credentialsPath, 'utf8');
+    assert.match(credentials, /^version: 1$/m);
+    assert.match(credentials, /^refs:$/m);
+    assert.match(credentials, /^  # keep this note$/m);
+    assert.match(credentials, /^  DEEPSEEK_API_KEY: keep-this-secret$/m);
+    assert.match(credentials, /^  PROXY_USER_KEY: "new-key"$/m);
+  });
+});
+
+test('拒绝修改未知版本凭据且不改动 settings', async () => {
+  await withTemporaryConfig(async ({ settingsPath, credentialsPath }) => {
+    const originalSettings = 'ui:\n  theme: dark\n';
+    const originalCredentials = 'version: 2\nrefs: {}\n';
+    await writeFile(settingsPath, originalSettings);
+    await writeFile(credentialsPath, originalCredentials);
+
+    await assert.rejects(
+      mergeDshConfig({
+        settingsPath,
+        credentialsPath,
+        baseUrl: 'https://proxy.example.com/dsh/instance-a',
+        model: 'deepseek-chat',
+        userKey: 'new-key',
+      }),
+      /version: 1/,
+    );
+
+    assert.equal(await readFile(settingsPath, 'utf8'), originalSettings);
+    assert.equal(await readFile(credentialsPath, 'utf8'), originalCredentials);
   });
 });

@@ -148,28 +148,48 @@ function updateSection(document, sectionName, values, removeKeys = []) {
   return document;
 }
 
-function updateTopLevelScalar(document, key, value) {
+function migrateFlatCredentials(document) {
   const { lines } = document;
-  const pattern = new RegExp(`^${escapeRegExp(key)}:`);
-  const indexes = [];
+  const contentLines = lines.filter((line) => line.trim() !== '' && !/^\s*#/.test(line));
 
-  for (let index = 0; index < lines.length; index += 1) {
-    if (pattern.test(lines[index])) {
-      indexes.push(index);
+  // dsh only migrates the old pre-release layout when every root entry is a
+  // scalar credential reference. Mirror that conservative recognition here so
+  // setup never turns an unrelated YAML document into a credentials file.
+  for (const line of contentLines) {
+    if (/^\s/.test(line) || !/^[A-Za-z_][A-Za-z0-9_]*:\s+\S/.test(line)) {
+      throw new Error('旧版凭据文件不是可迁移的扁平 key/value 格式，已停止写入');
     }
   }
 
-  if (indexes.length > 1) {
-    throw new Error(`凭据中存在重复的 ${key}，已停止写入`);
+  const migrated = ['version: 1', 'refs:'];
+  for (const line of lines) {
+    migrated.push(line === '' ? '' : `  ${line}`);
+  }
+  document.lines.splice(0, document.lines.length, ...migrated);
+}
+
+function updateCredentials(document, key, value) {
+  const { lines } = document;
+  const versionLines = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => /^version:/.test(line));
+
+  if (versionLines.length > 1) {
+    throw new Error('凭据中存在重复的 version，已停止写入');
   }
 
-  const nextLine = `${key}: ${JSON.stringify(value)}`;
-  if (indexes.length === 1) {
-    lines[indexes[0]] = nextLine;
-  } else {
-    appendBlock(lines, [nextLine]);
+  if (versionLines.length === 0) {
+    const hasContent = lines.some((line) => line.trim() !== '' && !/^\s*#/.test(line));
+    if (hasContent) {
+      migrateFlatCredentials(document);
+    } else {
+      lines.splice(0, lines.length, 'version: 1', 'refs:');
+    }
+  } else if (!/^version:\s*1\s*(?:#.*)?$/.test(versionLines[0].line)) {
+    throw new Error('只支持 dsh version: 1 凭据格式，已停止写入');
   }
 
+  updateSection(document, 'refs', { [key]: value });
   return document;
 }
 
@@ -259,7 +279,7 @@ export async function mergeDshConfig({
   });
 
   const credentialsDocument = parseDocument(credentialsText);
-  updateTopLevelScalar(credentialsDocument, 'PROXY_USER_KEY', userKey);
+  updateCredentials(credentialsDocument, 'PROXY_USER_KEY', userKey);
 
   // 两份文件都先完整解析并生成，再开始落盘，避免 YAML 不兼容时只写了一半。
   const settingsOutput = renderDocument(settingsDocument);
